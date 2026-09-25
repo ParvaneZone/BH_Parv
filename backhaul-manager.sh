@@ -12,7 +12,7 @@ GH_REPO="Musixal/Backhaul"
 CMD_NAME="ParvBH"
 SELF_CMD="$ROOT/usr/local/bin/$CMD_NAME"
 MY_REPO="https://github.com/ParvaneZone/BH_Parv"
-MY_TELEGRAM="@YourTelegramChannel"
+MY_TELEGRAM="https://t.me/parv49e"
 MY_NAME="Parv-BH | Backhaul Manager"
 
 if [[ -t 1 ]]; then
