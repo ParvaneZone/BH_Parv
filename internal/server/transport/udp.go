@@ -167,7 +167,7 @@ loop:
 			conn.SetReadDeadline(time.Time{})
 
 			if !utils.TokenEqual(msg, s.config.Token) {
-				s.logger.Warnf("invalid security token received: %s", msg)
+				s.logger.Warn("invalid security token received, discarding connection")
 				conn.Close()
 				continue
 			}

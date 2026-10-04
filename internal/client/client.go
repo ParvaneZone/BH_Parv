@@ -41,7 +41,7 @@ func (c *Client) Start() {
 	if c.config.PPROF {
 		go func() {
 			c.logger.Info("pprof started at port 6061")
-			http.ListenAndServe("0.0.0.0:6061", nil)
+			http.ListenAndServe("127.0.0.1:6061", nil)
 		}()
 	}
 
@@ -142,6 +142,34 @@ func (c *Client) Start() {
 		}
 		wsMuxClient := transport.NewWSMuxClient(c.ctx, wsMuxConfig, c.logger)
 		go wsMuxClient.Start()
+
+	case config.KCPMUX:
+		kcpMuxConfig := &transport.KcpMuxConfig{
+			RemoteAddr:       c.config.RemoteAddr,
+			Nodelay:          c.config.Nodelay,
+			KeepAlive:        time.Duration(c.config.Keepalive) * time.Second,
+			RetryInterval:    time.Duration(c.config.RetryInterval) * time.Second,
+			DialTimeOut:      time.Duration(c.config.DialTimeout) * time.Second,
+			ConnPoolSize:     c.config.ConnectionPool,
+			Token:            c.config.Token,
+			MuxVersion:       c.config.MuxVersion,
+			MaxFrameSize:     c.config.MaxFrameSize,
+			MaxReceiveBuffer: c.config.MaxReceiveBuffer,
+			MaxStreamBuffer:  c.config.MaxStreamBuffer,
+			Sniffer:          c.config.Sniffer,
+			WebPort:          c.config.WebPort,
+			SnifferLog:       c.config.SnifferLog,
+			AggressivePool:   c.config.AggressivePool,
+			MSS:              c.config.MSS,
+			SO_RCVBUF:        c.config.SO_RCVBUF,
+			SO_SNDBUF:        c.config.SO_SNDBUF,
+			KCP: network.KCPOptions{
+				Mode: c.config.KCPMode, MTU: c.config.KCPMTU, SndWnd: c.config.KCPSndWnd, RcvWnd: c.config.KCPRcvWnd,
+				DataShard: c.config.KCPDataShard, ParityShard: c.config.KCPParityShard, SockBuf: c.config.KCPSockBuf,
+			},
+		}
+		kcpMuxClient := transport.NewKcpMuxClient(c.ctx, kcpMuxConfig, c.logger)
+		go kcpMuxClient.Start()
 
 	case config.UDP:
 		udpConfig := &transport.UdpConfig{

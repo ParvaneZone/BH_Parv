@@ -17,11 +17,12 @@ import (
 	"github.com/ParvaneZone/BH_Parv/internal/web"
 
 	"github.com/sirupsen/logrus"
+	"github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/smux"
 )
 
-type TcpMuxTransport struct {
-	config           *TcpMuxConfig
+type KcpMuxTransport struct {
+	config           *KcpMuxConfig
 	smuxConfig       *smux.Config
 	parentctx        context.Context
 	ctx              context.Context
@@ -38,7 +39,7 @@ type TcpMuxTransport struct {
 	sessionCounter   int32
 }
 
-type TcpMuxConfig struct {
+type KcpMuxConfig struct {
 	BindAddr         string
 	TunnelStatus     string
 	SnifferLog       string
@@ -59,14 +60,15 @@ type TcpMuxConfig struct {
 	SO_RCVBUF        int
 	SO_SNDBUF        int
 	ProxyProtocol    bool
+	KCP              network.KCPOptions
 }
 
-func NewTcpMuxServer(parentCtx context.Context, config *TcpMuxConfig, logger *logrus.Logger) *TcpMuxTransport {
+func NewKcpMuxServer(parentCtx context.Context, config *KcpMuxConfig, logger *logrus.Logger) *KcpMuxTransport {
 	// Create a derived context from the parent context
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	// Initialize the TcpTransport struct
-	server := &TcpMuxTransport{
+	server := &KcpMuxTransport{
 		smuxConfig: &smux.Config{
 			Version:           config.MuxVersion,
 			KeepAliveInterval: 20 * time.Second,
@@ -93,18 +95,18 @@ func NewTcpMuxServer(parentCtx context.Context, config *TcpMuxConfig, logger *lo
 	return server
 }
 
-func (s *TcpMuxTransport) Start() {
+func (s *KcpMuxTransport) Start() {
 	if s.config.WebPort > 0 {
 		go s.usageMonitor.Monitor()
 	}
-	s.config.TunnelStatus = "Disconnected (TCPMux)"
+	s.config.TunnelStatus = "Disconnected (KCPMux)"
 
 	go s.tunnelListener()
 
 	s.channelHandshake()
 
 	if s.controlChannel != nil {
-		s.config.TunnelStatus = "Connected (TCPMux)"
+		s.config.TunnelStatus = "Connected (KCPMux)"
 
 		numCPU := runtime.NumCPU()
 		if numCPU > 4 {
@@ -123,7 +125,7 @@ func (s *TcpMuxTransport) Start() {
 	}
 
 }
-func (s *TcpMuxTransport) Restart() {
+func (s *KcpMuxTransport) Restart() {
 	if !s.restartMutex.TryLock() {
 		s.logger.Warn("server restart already in progress, skipping restart attempt")
 		return
@@ -167,7 +169,7 @@ func (s *TcpMuxTransport) Restart() {
 	go s.Start()
 }
 
-func (s *TcpMuxTransport) channelHandshake() {
+func (s *KcpMuxTransport) channelHandshake() {
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -210,16 +212,6 @@ func (s *TcpMuxTransport) channelHandshake() {
 				continue
 			}
 
-			//FORCE CONTROL CHANNEL TO BE TCP_NODELAY
-			tcpConn, ok := conn.(*net.TCPConn)
-			if !ok {
-				conn.Close()
-				continue
-			}
-			if err := tcpConn.SetNoDelay(true); err != nil {
-				s.logger.Warnf("failed to set TCP_NODELAY for Control Channel %s: %v", tcpConn.RemoteAddr().String(), err)
-			}
-
 			s.controlChannel = conn
 
 			s.logger.Info("control channel successfully established.")
@@ -229,7 +221,7 @@ func (s *TcpMuxTransport) channelHandshake() {
 	}
 }
 
-func (s *TcpMuxTransport) channelHandler() {
+func (s *KcpMuxTransport) channelHandler() {
 	ticker := time.NewTicker(s.config.Heartbeat)
 	defer ticker.Stop()
 
@@ -286,76 +278,52 @@ func (s *TcpMuxTransport) channelHandler() {
 	}
 }
 
-func (s *TcpMuxTransport) tunnelListener() {
-	listener, err := network.ListenWithBuffers(
-		"tcp",
-		s.config.BindAddr,
-		s.config.SO_RCVBUF,
-		s.config.SO_SNDBUF,
-		s.config.MSS,
-		s.config.KeepAlive,
-		!s.config.Nodelay,
-	)
+func (s *KcpMuxTransport) tunnelListener() {
+	listener, err := network.KCPListen(s.config.BindAddr, s.config.Token, s.config.KCP)
 	if err != nil {
-		s.logger.Fatalf("failed to start listener on %s: %v", s.config.BindAddr, err)
+		s.logger.Fatalf("failed to start kcp listener on %s: %v", s.config.BindAddr, err)
 		return
 	}
 
 	defer listener.Close()
 
-	s.logger.Infof("server started successfully, listening on address: %s", listener.Addr().String())
+	s.logger.Infof("server started successfully, listening (kcp/udp) on address: %s", listener.Addr().String())
 
 	go s.acceptTunnelConn(listener)
 
 	<-s.ctx.Done()
 }
 
-func (s *TcpMuxTransport) acceptTunnelConn(listener net.Listener) {
+func (s *KcpMuxTransport) acceptTunnelConn(listener *kcp.Listener) {
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		default:
-			s.logger.Debugf("waiting for accept incoming tunnel connection on %s", listener.Addr().String())
-			conn, err := listener.Accept()
+			s.logger.Debugf("waiting for accept incoming tunnel session on %s", listener.Addr().String())
+			conn, err := listener.AcceptKCP()
 			if err != nil {
-				s.logger.Debugf("failed to accept tunnel connection on %s: %v", listener.Addr().String(), err)
+				s.logger.Debugf("failed to accept tunnel session on %s: %v", listener.Addr().String(), err)
+				select {
+				case <-s.ctx.Done():
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
 				continue
 			}
 
-			//discard any non tcp connection
-			tcpConn, ok := conn.(*net.TCPConn)
-			if !ok {
-				s.logger.Warnf("disarded non-TCP tunnel connection from %s", conn.RemoteAddr().String())
-				conn.Close()
-				continue
-			}
-
-			// Drop all suspicious packets from other address rather than server
-			if s.controlChannel != nil && s.controlChannel.RemoteAddr().(*net.TCPAddr).IP.String() != tcpConn.RemoteAddr().(*net.TCPAddr).IP.String() {
-				s.logger.Debugf("suspicious packet from %v. expected address: %v. discarding packet...", tcpConn.RemoteAddr().(*net.TCPAddr).IP.String(), s.controlChannel.RemoteAddr().(*net.TCPAddr).IP.String())
-				tcpConn.Close()
-				continue
-			}
-
-			// trying to set tcpnodelay
-			if !s.config.Nodelay {
-				if err := tcpConn.SetNoDelay(s.config.Nodelay); err != nil {
-					s.logger.Warnf("failed to set TCP_NODELAY for %s: %v", tcpConn.RemoteAddr().String(), err)
-				} else {
-					s.logger.Tracef("TCP_NODELAY disabled for %s", tcpConn.RemoteAddr().String())
+			// Drop sessions from any address other than the control channel peer
+			if s.controlChannel != nil {
+				ctrlAddr, ok1 := s.controlChannel.RemoteAddr().(*net.UDPAddr)
+				newAddr, ok2 := conn.RemoteAddr().(*net.UDPAddr)
+				if ok1 && ok2 && !ctrlAddr.IP.Equal(newAddr.IP) {
+					s.logger.Debugf("suspicious session from %v. expected address: %v. discarding...", newAddr.IP, ctrlAddr.IP)
+					conn.Close()
+					continue
 				}
 			}
 
-			// Set keep-alive settings
-			if err := tcpConn.SetKeepAlive(true); err != nil {
-				s.logger.Warnf("failed to enable TCP keep-alive for %s: %v", tcpConn.RemoteAddr().String(), err)
-			} else {
-				s.logger.Tracef("TCP keep-alive enabled for %s", tcpConn.RemoteAddr().String())
-			}
-			if err := tcpConn.SetKeepAlivePeriod(s.config.KeepAlive); err != nil {
-				s.logger.Warnf("failed to set TCP keep-alive period for %s: %v", tcpConn.RemoteAddr().String(), err)
-			}
+			network.KCPApplyTuning(conn, s.config.KCP)
 
 			// try to establish a new channel
 			if s.controlChannel == nil {
@@ -369,25 +337,45 @@ func (s *TcpMuxTransport) acceptTunnelConn(listener net.Listener) {
 				continue
 			}
 
-			session, err := smux.Client(conn, s.smuxConfig)
-			if err != nil {
-				s.logger.Errorf("failed to create MUX session for connection %s: %v", conn.RemoteAddr().String(), err)
-				conn.Close()
-				continue
-			}
-
-			select {
-			case s.tunnelChannel <- session: // ok
-			default:
-				s.logger.Warnf("tunnel listener channel is full, discarding TCP connection from %s", conn.LocalAddr().String())
-				session.Close()
-			}
+			// KCP sessions only become visible to the server after the first packet,
+			// so the client sends a hello (token) on every pool session. Read it
+			// off the accept loop so a silent peer cannot block new sessions.
+			go s.admitSession(conn)
 		}
 	}
 
 }
 
-func (s *TcpMuxTransport) parsePortMappings() {
+// admitSession validates the hello of a pool session and wraps it in smux.
+func (s *KcpMuxTransport) admitSession(conn net.Conn) {
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		conn.Close()
+		return
+	}
+	msg, sig, err := utils.ReceiveBinaryTransportString(conn)
+	if err != nil || sig != utils.SG_TCP || !utils.TokenEqual(msg, s.config.Token) {
+		s.logger.Debugf("invalid hello from tunnel session %s, discarding", conn.RemoteAddr().String())
+		conn.Close()
+		return
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	session, err := smux.Client(conn, s.smuxConfig)
+	if err != nil {
+		s.logger.Errorf("failed to create MUX session for connection %s: %v", conn.RemoteAddr().String(), err)
+		conn.Close()
+		return
+	}
+
+	select {
+	case s.tunnelChannel <- session: // ok
+	default:
+		s.logger.Warnf("tunnel listener channel is full, discarding session from %s", conn.RemoteAddr().String())
+		session.Close()
+	}
+}
+
+func (s *KcpMuxTransport) parsePortMappings() {
 	for _, portMapping := range s.config.Ports {
 		parts := strings.Split(portMapping, "=")
 
@@ -478,7 +466,7 @@ func (s *TcpMuxTransport) parsePortMappings() {
 	}
 }
 
-func (s *TcpMuxTransport) localListener(localAddr string, remoteAddr string) {
+func (s *KcpMuxTransport) localListener(localAddr string, remoteAddr string) {
 	listener, err := net.Listen("tcp", localAddr)
 	if err != nil {
 		s.logger.Fatalf("failed to start listener on %s: %v", localAddr, err)
@@ -494,7 +482,7 @@ func (s *TcpMuxTransport) localListener(localAddr string, remoteAddr string) {
 	<-s.ctx.Done()
 }
 
-func (s *TcpMuxTransport) acceptLocalConn(listener net.Listener, remoteAddr string) {
+func (s *KcpMuxTransport) acceptLocalConn(listener net.Listener, remoteAddr string) {
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -551,7 +539,7 @@ func (s *TcpMuxTransport) acceptLocalConn(listener net.Listener, remoteAddr stri
 
 }
 
-func (s *TcpMuxTransport) handleLoop() {
+func (s *KcpMuxTransport) handleLoop() {
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -566,7 +554,7 @@ func (s *TcpMuxTransport) handleLoop() {
 	}
 }
 
-func (s *TcpMuxTransport) handleSession(session *smux.Session) {
+func (s *KcpMuxTransport) handleSession(session *smux.Session) {
 	counter := make(chan struct{}, s.config.MuxCon)
 	defer session.Close()
 	defer close(counter)
@@ -614,7 +602,7 @@ func (s *TcpMuxTransport) handleSession(session *smux.Session) {
 	}
 }
 
-func (s *TcpMuxTransport) handleSessionError(incomingConn *LocalTCPConn, err error) {
+func (s *KcpMuxTransport) handleSessionError(incomingConn *LocalTCPConn, err error) {
 	s.logger.Tracef("failed to handle session: %v", err)
 
 	// decrease session value

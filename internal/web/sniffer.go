@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +55,11 @@ type SystemStats struct {
 }
 
 func NewDataStore(listenAddr string, shutdownCtx context.Context, snifferLog string, sniffer bool, tunnelStatus *string, logger *logrus.Logger) *Usage {
+	// The panel has no authentication: bind to loopback unless an explicit host is given.
+	// Reach it remotely with: ssh -L <port>:127.0.0.1:<port> user@server
+	if strings.HasPrefix(listenAddr, ":") {
+		listenAddr = "127.0.0.1" + listenAddr
+	}
 	ctx, cancel := context.WithCancel(shutdownCtx)
 	u := &Usage{
 		listenAddr:   listenAddr,

@@ -77,16 +77,73 @@ detect_arch() {
     *) echo unknown ;;
   esac
 }
+pm_name() {
+  if command -v apt-get >/dev/null 2>&1; then echo apt
+  elif command -v dnf >/dev/null 2>&1; then echo dnf
+  elif command -v yum >/dev/null 2>&1; then echo yum
+  elif command -v apk >/dev/null 2>&1; then echo apk
+  else echo unknown; fi
+}
+pkg_name() { # command name -> package name for this distro
+  case "$1" in
+    ss|ip) case "$(pm_name)" in apt|apk) echo iproute2 ;; *) echo iproute ;; esac ;;
+    sha256sum) echo coreutils ;;
+    *) echo "$1" ;;
+  esac
+}
+pm_install() {
+  case "$(pm_name)" in
+    apt) DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@" ;;
+    dnf) dnf install -y -q "$@" ;;
+    yum) yum install -y -q "$@" ;;
+    apk) apk add --quiet "$@" ;;
+    *)   return 1 ;;
+  esac
+}
 ensure_deps() {
-  local miss=() c
-  for c in "$@"; do command -v "$c" >/dev/null 2>&1 || miss+=("$c"); done
+  local miss=() pk=() c
+  for c in "$@"; do
+    command -v "$c" >/dev/null 2>&1 || { miss+=("$c"); pk+=("$(pkg_name "$c")"); }
+  done
   (( ${#miss[@]} == 0 )) && return 0
-  info "Installing missing packages: ${miss[*]}"
-  if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq "${miss[@]}"
-  elif command -v dnf >/dev/null 2>&1; then dnf install -y -q "${miss[@]}"
-  elif command -v yum >/dev/null 2>&1; then yum install -y -q "${miss[@]}"
-  else err "Please install manually: ${miss[*]}"; return 1
+  mapfile -t pk < <(printf '%s\n' "${pk[@]}" | awk '!seen[$0]++')
+  info "Installing missing packages: ${pk[*]}"
+  pm_install "${pk[@]}" || { err "Could not install: ${pk[*]}. Please install them manually."; return 1; }
+}
+
+# Prerequisites: curl tar openssl python3 (UDP test) ss/ip (port checks) sha256sum (release verification)
+REQ_CMDS=(curl tar openssl python3 ss ip sha256sum)
+have_cron() { command -v crond >/dev/null 2>&1 || command -v cron >/dev/null 2>&1; }
+prereq_check() { # $1 = 1: verbose report (menu), 0: quiet auto-fix (startup)
+  local v="${1:-0}" c bad=0 miss=()
+  (( v )) && echo && echo "${BD}Prerequisites check${N}"
+  for c in "${REQ_CMDS[@]}"; do
+    command -v "$c" >/dev/null 2>&1 || miss+=("$c")
+  done
+  if (( ${#miss[@]} )); then
+    (( v )) && warn "Missing: ${miss[*]}"
+    ensure_deps "${miss[@]}" || bad=1
   fi
+  if [[ ! -s /etc/ssl/certs/ca-certificates.crt && ! -s /etc/pki/tls/certs/ca-bundle.crt ]]; then
+    info "Installing ca-certificates"
+    pm_install ca-certificates || bad=1
+  fi
+  (( v )) || return $bad
+  for c in "${REQ_CMDS[@]}"; do
+    if command -v "$c" >/dev/null 2>&1; then ok "$c"; else err "$c is STILL missing"; bad=1; fi
+  done
+  if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then ok "systemd"; else err "systemd is not running (required for services)"; bad=1; fi
+  if [[ $(detect_arch) == unknown ]]; then err "Unsupported CPU $(uname -m) (release binaries: amd64/arm64; use build-from-source)"; else ok "CPU: $(detect_arch)"; fi
+  if curl -fsI --proto '=https' --tlsv1.2 --max-time 8 https://github.com >/dev/null 2>&1; then ok "github.com reachable"
+  else warn "github.com NOT reachable from this server (use a mirror URL or a local file in 'Install binary')"; fi
+  if have_cron; then ok "cron"; else
+    warn "cron is not installed (only needed for scheduled restart option 3)"
+    if ask_yn "Install cron now?" n; then pm_install "$([[ $(pm_name) == apt ]] && echo cron || echo cronie)" && ok "cron installed"; fi
+  fi
+  if ufw_active; then ok "ufw is active (the manager can open ports for you)"; else info "ufw not active (nothing to open)"; fi
+  [[ -x $BIN ]] && ok "backhaul binary: $("$BIN" -v 2>/dev/null || echo installed)" || warn "backhaul binary not installed yet (menu option 4)"
+  (( bad )) && err "Some prerequisites are still missing - fix them manually." || ok "All prerequisites are ready."
+  return $bad
 }
 
 port_in_use() {
@@ -200,10 +257,12 @@ reset_vars() {
   NAME=; TRANSPORT=tcp; TUN_PORT=; TOKEN=; PORTS=(); ACCEPT_UDP=false
   NODELAY=true; KEEPALIVE=75; HEARTBEAT=40; CHANNEL_SIZE=2048; WEB_PORT=0
   LOG_LEVEL=info; MUX_CON=8; MUX_VER=1; MUX_FRAME=32768; MUX_RECV=4194304
-  MUX_STREAM=65536; POOL=8; AGGR=false; RETRY=3; DIAL=10; EDGE_IP=
-  SRV_HOST=; SRV_PORT=
+  MUX_STREAM=65536; KCP_MODE=fast; POOL=8; AGGR=false; RETRY=3; DIAL=10; EDGE_IP=
+  SRV_HOST=; SRV_PORT=; TLS_PIN=
 }
 is_mux() { [[ $TRANSPORT == *mux ]]; }
+is_kcp() { [[ $TRANSPORT == kcpmux ]]; }
+is_udp_based() { [[ $TRANSPORT == udp || $TRANSPORT == kcpmux ]]; }
 is_tls() { [[ $TRANSPORT == wss || $TRANSPORT == wssmux ]]; }
 is_ws()  { [[ $TRANSPORT == ws* ]]; }
 
@@ -213,26 +272,37 @@ ask_transport() {
     "tcp|tcp - simple and fast (good default)" \
     "tcpmux|tcpmux - many sessions over one TCP connection" \
     "udp|udp - UDP transport" \
+    "kcpmux|kcpmux - KCP over UDP + multiplexing (fast on lossy links, needs UDP open)" \
     "ws|ws - WebSocket (passes HTTP-only firewalls / CDN)" \
     "wss|wss - WebSocket + TLS (encrypted)" \
     "wsmux|wsmux - WebSocket + multiplexing" \
     "wssmux|wssmux - WebSocket + TLS + multiplexing"
+}
+ask_kcp_advanced() {
+  KCP_MODE=$(choose "kcp_mode (fast = good default; fast3 = lowest latency, most bandwidth)" 2 \
+    "normal|normal" "fast|fast" "fast2|fast2" "fast3|fast3")
 }
 ask_mux_advanced() {
   MUX_CON=$(ask_int "mux_con (multiplexed connections)" "$MUX_CON" 1 1024)
   MUX_VER=$(ask_int "mux_version (1 or 2, must match on both sides)" "$MUX_VER" 1 2)
 }
 
+tls_fp() { # sha256 fingerprint (lowercase hex, no colons) of tunnel $1's certificate
+  openssl x509 -in "$CERT_DIR/$1.crt" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f'
+}
 make_conn_string() {
-  printf 'BH1:%s' "$(printf '%s|%s|%s|%s|%s' "$TRANSPORT" "$1" "$TUN_PORT" "$TOKEN" "$MUX_VER" | base64 | tr -d '\n')"
+  local pin=""
+  is_tls && pin=$(tls_fp "$NAME")
+  printf 'BH1:%s' "$(printf '%s|%s|%s|%s|%s|%s' "$TRANSPORT" "$1" "$TUN_PORT" "$TOKEN" "$MUX_VER" "$pin" | base64 | tr -d '\n')"
 }
 parse_conn_string() {
   local s="${1#BH1:}" d
   d=$(printf '%s' "$s" | base64 -d 2>/dev/null) || return 1
-  IFS='|' read -r TRANSPORT SRV_HOST SRV_PORT TOKEN MUX_VER <<<"$d"
-  [[ $TRANSPORT =~ ^(tcp|tcpmux|udp|ws|wss|wsmux|wssmux)$ ]] || return 1
+  IFS='|' read -r TRANSPORT SRV_HOST SRV_PORT TOKEN MUX_VER TLS_PIN <<<"$d"
+  [[ $TRANSPORT =~ ^(tcp|tcpmux|udp|kcpmux|ws|wss|wsmux|wssmux)$ ]] || return 1
   [[ -n $SRV_HOST && $SRV_PORT =~ ^[0-9]+$ && -n $TOKEN ]] || return 1
   MUX_VER="${MUX_VER:-1}"
+  [[ -z $TLS_PIN || $TLS_PIN =~ ^[0-9a-f]{64}$ ]] || return 1
 }
 
 write_server_conf() {
@@ -261,6 +331,7 @@ write_server_conf() {
       echo "tls_cert = \"${CERT_DIR#$ROOT}/${NAME}.crt\""
       echo "tls_key = \"${CERT_DIR#$ROOT}/${NAME}.key\""
     fi
+    is_kcp && echo "kcp_mode = \"${KCP_MODE}\""
     echo "sniffer = false"
     echo "web_port = ${WEB_PORT}"
     echo "log_level = \"${LOG_LEVEL}\""
@@ -280,6 +351,7 @@ write_client_conf() {
     is_ws && [[ -n $EDGE_IP ]] && echo "edge_ip = \"${EDGE_IP}\""
     echo "transport = \"${TRANSPORT}\""
     echo "token = \"${TOKEN}\""
+    is_tls && [[ -n $TLS_PIN ]] && echo "tls_pin = \"${TLS_PIN}\""
     echo "connection_pool = ${POOL}"
     echo "aggressive_pool = ${AGGR}"
     echo "retry_interval = ${RETRY}"
@@ -294,6 +366,7 @@ write_client_conf() {
       echo "mux_recievebuffer = ${MUX_RECV}"
       echo "mux_streambuffer = ${MUX_STREAM}"
     fi
+    is_kcp && echo "kcp_mode = \"${KCP_MODE}\""
     echo "sniffer = false"
     echo "web_port = ${WEB_PORT}"
     echo "log_level = \"${LOG_LEVEL}\""
@@ -325,6 +398,9 @@ ExecStart=${BIN#$ROOT} -c ${CONF_DIR#$ROOT}/${n}.toml
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target
@@ -350,7 +426,7 @@ server_firewall() {
   ufw_active || return 0
   ask_yn "ufw is active. Open the tunnel port and forwarded ports?" y || return 0
   local tp=tcp fp="tcp" s p pr
-  [[ $TRANSPORT == udp ]] && { tp=udp; fp="udp"; }
+  is_udp_based && { tp=udp; fp="udp"; }
   [[ $TRANSPORT == tcp && $ACCEPT_UDP == true ]] && fp="tcp udp"
   ufw allow "${TUN_PORT}/${tp}" >/dev/null
   for s in "${PORTS[@]}"; do
@@ -360,8 +436,23 @@ server_firewall() {
   ok "ufw rules added."
 }
 
+verify_checksum() { # $1 file, $2 asset name in checksums.txt
+  local sums exp got
+  sums=$(curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 \
+    "https://github.com/${GH_REPO}/releases/latest/download/checksums.txt") || sums=""
+  exp=$(awk -v f="$2" '$2==f {print $1}' <<<"$sums")
+  if [[ -z $exp ]]; then
+    warn "No checksum found for $2 in the release."
+    ask_yn "Continue WITHOUT integrity verification?" n
+    return
+  fi
+  got=$(sha256sum "$1" | awk '{print $1}')
+  if [[ $exp == "$got" ]]; then ok "SHA-256 verified."; return 0; fi
+  err "Checksum MISMATCH (expected $exp, got $got). The download is corrupted or tampered with."
+  return 1
+}
 install_binary() {
-  ensure_deps curl tar || return 1
+  ensure_deps curl tar sha256sum || return 1
   mkdir -p "$(dirname "$BIN")"
   local arch choice tmp url file bin
   arch=$(detect_arch)
@@ -377,7 +468,8 @@ install_binary() {
       [[ $arch == unknown ]] && { err "Unsupported CPU: $(uname -m). Use another option."; rm -rf "$tmp"; return 1; }
       url="https://github.com/${GH_REPO}/releases/latest/download/backhaul_linux_${arch}.tar.gz"
       info "Downloading $url"
-      curl -fL --retry 3 --connect-timeout 15 -o "$tmp/pkg" "$url" || { err "Download failed."; rm -rf "$tmp"; return 1; }
+      curl -fL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 -o "$tmp/pkg" "$url" || { err "Download failed."; rm -rf "$tmp"; return 1; }
+      verify_checksum "$tmp/pkg" "backhaul_linux_${arch}.tar.gz" || { rm -rf "$tmp"; return 1; }
       ;;
     url)
       url=$(ask "URL" "")
@@ -415,7 +507,8 @@ new_server_tunnel() {
   NAME=$(ask_name)
   TRANSPORT=$(ask_transport)
   [[ $TRANSPORT == udp ]] && HEARTBEAT=20
-  local proto=tcp; [[ $TRANSPORT == udp ]] && proto=udp
+  local proto=tcp; is_udp_based && proto=udp
+  is_kcp && warn "kcpmux needs UDP open between the servers. Test it first from the main menu (option 8)."
   TUN_PORT=$(ask_tunnel_port "$(next_free_port 3080 "$proto")" "$proto")
   TOKEN=$(ask_token)
   mapfile -t PORTS < <(ask_ports)
@@ -426,6 +519,7 @@ new_server_tunnel() {
     HEARTBEAT=$(ask_int "heartbeat (s)" "$HEARTBEAT" 1 3600)
     CHANNEL_SIZE=$(ask_int "channel_size" "$CHANNEL_SIZE" 1 1000000)
     is_mux && ask_mux_advanced
+    is_kcp && ask_kcp_advanced
     if ask_yn "Enable the web monitoring interface?" n; then
       WEB_PORT=$(ask_int "web_port" "$(next_free_port 2060)" 1 65535)
     fi
@@ -471,7 +565,13 @@ new_client_tunnel() {
     [[ -z $SRV_HOST ]] && { err "Server address is required."; return; }
     SRV_PORT=$(ask_int "Tunnel port on the server" 3080 1 65535)
     TOKEN=$(ask_token)
+    if is_tls; then
+      TLS_PIN=$(ask "Server certificate sha256 pin (64 hex chars, Enter = skip, NOT recommended)" "")
+      TLS_PIN=$(echo "$TLS_PIN" | tr -d ': ' | tr 'A-F' 'a-f')
+      [[ -z $TLS_PIN || $TLS_PIN =~ ^[0-9a-f]{64}$ ]] || { err "Invalid pin."; return; }
+    fi
   fi
+  if is_tls && [[ -z $TLS_PIN ]]; then warn "No tls_pin: the server certificate will NOT be verified (MITM possible)."; fi
   if ask_yn "Change advanced settings?" n; then
     POOL=$(ask_int "connection_pool" "$POOL" 1 1024)
     ask_yn "aggressive_pool?" n && AGGR=true
@@ -482,6 +582,7 @@ new_client_tunnel() {
       ask_yn "nodelay?" y || NODELAY=false
     fi
     is_mux && ask_mux_advanced
+    is_kcp && ask_kcp_advanced
     is_ws && EDGE_IP=$(ask "edge_ip (CDN edge IP, empty = none)" "")
     if ask_yn "Enable the web monitoring interface?" n; then
       WEB_PORT=$(ask_int "web_port" "$(next_free_port 2060)" 1 65535)
@@ -634,7 +735,7 @@ update_self() {
   tmp=$(mktemp)
   info "Downloading latest $CMD_NAME from $MY_REPO"
   curl -fL --retry 3 --connect-timeout 15 -o "$tmp" \
-    "https://raw.githubusercontent.com/ParvaneZone/BH_Parv/main/backhaul-manager.sh" \
+    --proto '=https' --tlsv1.2 "https://raw.githubusercontent.com/ParvaneZone/BH_Parv/main/backhaul-manager.sh" \
     || { err "Download failed."; rm -f "$tmp"; return 1; }
   install -m 755 "$tmp" "$SELF_CMD" && ok "Updated. Run '$CMD_NAME' to use the new version."
   rm -f "$tmp"
@@ -652,6 +753,76 @@ uninstall_all() {
   rm -rf "$CONF_DIR" "$BIN"
   sd daemon-reload
   ok "Everything removed."
+}
+udp_test() {
+  ensure_deps python3 || return 1
+  local v port host
+  echo
+  echo "${BD}UDP connectivity test${N} (needed for udp / kcpmux transports)"
+  echo "  1) Receiver - run on the Iran (server) side first; answers probes"
+  echo "  2) Sender   - run on the foreign (client) side; sends probes to the receiver"
+  echo "  0) Back"
+  read -r -p "Select: " v
+  case "$v" in
+    1) port=$(ask_int "UDP port to listen on" 3080 1 65535)
+       if port_in_use "$port" udp; then err "UDP port $port is already in use. Stop whatever uses it first."; return; fi
+       if ufw_active && ask_yn "ufw is active. Allow ${port}/udp now?" y; then ufw allow "${port}/udp" >/dev/null; fi
+       info "Listening on UDP $port for 90 seconds. Start the Sender on the other server now."
+       python3 - "$port" <<'PY'
+import socket, sys, time
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", port))
+end = time.time() + 90
+got = 0
+while time.time() < end and got < 5:
+    s.settimeout(max(0.1, end - time.time()))
+    try:
+        data, addr = s.recvfrom(2048)
+    except socket.timeout:
+        break
+    if not data.startswith(b"BHPARV-PING"):
+        continue
+    got += 1
+    print("  probe %d received from %s:%d -> replied" % (got, addr[0], addr[1]), flush=True)
+    s.sendto(b"BHPARV-PONG" + data[11:], addr)
+print("RESULT: %s" % ("received %d probe(s): UDP reaches this server." % got if got else "no probe received: UDP is blocked on the way in, or the sender used a wrong IP/port."))
+PY
+       ;;
+    2) host=$(ask "Iran server IP or domain" "")
+       [[ -z $host ]] && { err "Server address is required."; return; }
+       port=$(ask_int "UDP port the receiver listens on" 3080 1 65535)
+       info "Sending 5 probes to $host:$port ..."
+       python3 - "$host" "$port" <<'PY'
+import socket, sys, time
+host, port = sys.argv[1], int(sys.argv[2])
+try:
+    fam, typ, proto, _, addr = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)[0]
+except Exception as e:
+    print("RESULT: cannot resolve %s: %s" % (host, e)); sys.exit(1)
+s = socket.socket(fam, typ)
+ok = 0
+for i in range(5):
+    s.sendto(b"BHPARV-PING%d" % i, addr)
+    s.settimeout(3)
+    try:
+        data, _ = s.recvfrom(2048)
+        if data.startswith(b"BHPARV-PONG"):
+            ok += 1
+            print("  probe %d: reply received" % (i + 1), flush=True)
+    except socket.timeout:
+        print("  probe %d: no reply" % (i + 1), flush=True)
+    time.sleep(0.3)
+if ok == 5:
+    print("RESULT: UDP OPEN in both directions (5/5). kcpmux/udp should work.")
+elif ok:
+    print("RESULT: UDP works but lossy (%d/5). kcpmux can still help; try fast2 or FEC." % ok)
+else:
+    print("RESULT: no reply. Either UDP is blocked (provider/ufw/iptables), or the Receiver is not running on that port.")
+PY
+       ;;
+    *) return ;;
+  esac
 }
 print_banner() {
   echo "${C}${BD}"
@@ -678,6 +849,8 @@ main_menu() {
     echo "  5) Restart all tunnels"
     echo "  6) Uninstall everything"
     echo "  7) Update $CMD_NAME to the latest version"
+    echo "  8) UDP connectivity test (for udp / kcpmux)"
+    echo "  9) Check / fix prerequisites"
     echo "  0) Exit"
     read -r -p "Select: " c || exit 0
     case "$c" in
@@ -688,6 +861,8 @@ main_menu() {
       5) restart_all ;;
       6) uninstall_all ;;
       7) update_self ;;
+      8) udp_test ;;
+      9) prereq_check 1 ;;
       0) exit 0 ;;
       *) err "Invalid choice." ;;
     esac
@@ -699,4 +874,5 @@ if [[ -z $ROOT ]]; then
   command -v systemctl >/dev/null 2>&1 || { err "systemd is required."; exit 1; }
 fi
 mkdir -p "$CONF_DIR"
+[[ -z $ROOT ]] && { prereq_check 0 || warn "Some prerequisites are missing - run menu option 9."; }
 main_menu

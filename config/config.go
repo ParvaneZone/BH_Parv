@@ -11,6 +11,7 @@ const (
 	WSMUX  TransportType = "wsmux"
 	WSSMUX TransportType = "wssmux"
 	UDP    TransportType = "udp"
+	KCPMUX TransportType = "kcpmux"
 )
 
 // ServerConfig represents the configuration for the server.
@@ -44,6 +45,13 @@ type ServerConfig struct {
 	ProxyProtocol    bool          `toml:"proxy_protocol"`
 	RestartInterval  int           `toml:"restart_interval"` // minutes, 0 = disabled
 	RestartAt        []string      `toml:"restart_at"`       // daily local times, e.g. ["04:30"]
+	KCPMode          string        `toml:"kcp_mode"`         // normal | fast | fast2 | fast3
+	KCPMTU           int           `toml:"kcp_mtu"`
+	KCPSndWnd        int           `toml:"kcp_sndwnd"`
+	KCPRcvWnd        int           `toml:"kcp_rcvwnd"`
+	KCPDataShard     int           `toml:"kcp_datashard"`   // FEC, 0 = off, must match on both sides
+	KCPParityShard   int           `toml:"kcp_parityshard"` // FEC, 0 = off, must match on both sides
+	KCPSockBuf       int           `toml:"kcp_sockbuf"`
 }
 
 // ClientConfig represents the configuration for the client.
@@ -77,6 +85,13 @@ type ClientConfig struct {
 	TLSSNI           string        `toml:"tls_sni"`          // wss/wssmux: custom SNI / server name
 	RestartInterval  int           `toml:"restart_interval"` // minutes, 0 = disabled
 	RestartAt        []string      `toml:"restart_at"`       // daily local times, e.g. ["04:30"]
+	KCPMode          string        `toml:"kcp_mode"`         // normal | fast | fast2 | fast3
+	KCPMTU           int           `toml:"kcp_mtu"`
+	KCPSndWnd        int           `toml:"kcp_sndwnd"`
+	KCPRcvWnd        int           `toml:"kcp_rcvwnd"`
+	KCPDataShard     int           `toml:"kcp_datashard"`   // FEC, 0 = off, must match on both sides
+	KCPParityShard   int           `toml:"kcp_parityshard"` // FEC, 0 = off, must match on both sides
+	KCPSockBuf       int           `toml:"kcp_sockbuf"`
 }
 
 // Config represents the complete configuration, including both server and client settings.

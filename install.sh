@@ -9,9 +9,18 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-command -v curl >/dev/null 2>&1 || { echo "curl is required." >&2; exit 1; }
+# Prepare the minimum needed to download the manager (the manager installs the rest itself).
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl not found, installing..."
+  if   command -v apt-get >/dev/null 2>&1; then apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates
+  elif command -v dnf     >/dev/null 2>&1; then dnf install -y -q curl ca-certificates
+  elif command -v yum     >/dev/null 2>&1; then yum install -y -q curl ca-certificates
+  elif command -v apk     >/dev/null 2>&1; then apk add --quiet curl ca-certificates
+  else echo "Please install curl manually." >&2; exit 1
+  fi
+fi
 
-curl -fsSL "$REPO_RAW" -o "$DEST"
+curl -fsSL --proto '=https' --tlsv1.2 "$REPO_RAW" -o "$DEST"
 chmod +x "$DEST"
 
 echo "Installed. From anywhere on this server, run: ParvBH"

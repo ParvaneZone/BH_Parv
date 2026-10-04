@@ -9,6 +9,7 @@ import (
 	"github.com/ParvaneZone/BH_Parv/config"
 	"github.com/ParvaneZone/BH_Parv/internal/server/transport"
 	"github.com/ParvaneZone/BH_Parv/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/utils/network"
 
 	"github.com/sirupsen/logrus"
 )
@@ -35,7 +36,7 @@ func (s *Server) Start() {
 	if s.config.PPROF {
 		go func() {
 			s.logger.Info("pprof started at port 6060")
-			http.ListenAndServe("0.0.0.0:6060", nil)
+			http.ListenAndServe("127.0.0.1:6060", nil)
 		}()
 	}
 
@@ -133,6 +134,33 @@ func (s *Server) Start() {
 
 		wsMuxServer := transport.NewWSMuxServer(s.ctx, wsMuxConfig, s.logger)
 		go wsMuxServer.Start()
+
+	case config.KCPMUX:
+		kcpMuxConfig := &transport.KcpMuxConfig{
+			BindAddr:         s.config.BindAddr,
+			Nodelay:          s.config.Nodelay,
+			KeepAlive:        time.Duration(s.config.Keepalive) * time.Second,
+			Heartbeat:        time.Duration(s.config.Heartbeat) * time.Second,
+			Token:            s.config.Token,
+			ChannelSize:      s.config.ChannelSize,
+			Ports:            s.config.Ports,
+			MuxCon:           s.config.MuxCon,
+			MuxVersion:       s.config.MuxVersion,
+			MaxFrameSize:     s.config.MaxFrameSize,
+			MaxReceiveBuffer: s.config.MaxReceiveBuffer,
+			MaxStreamBuffer:  s.config.MaxStreamBuffer,
+			Sniffer:          s.config.Sniffer,
+			WebPort:          s.config.WebPort,
+			SnifferLog:       s.config.SnifferLog,
+			ProxyProtocol:    s.config.ProxyProtocol,
+			KCP: network.KCPOptions{
+				Mode: s.config.KCPMode, MTU: s.config.KCPMTU, SndWnd: s.config.KCPSndWnd, RcvWnd: s.config.KCPRcvWnd,
+				DataShard: s.config.KCPDataShard, ParityShard: s.config.KCPParityShard, SockBuf: s.config.KCPSockBuf,
+			},
+		}
+
+		kcpMuxServer := transport.NewKcpMuxServer(s.ctx, kcpMuxConfig, s.logger)
+		go kcpMuxServer.Start()
 
 	case config.UDP:
 		udpConfig := &transport.UdpConfig{

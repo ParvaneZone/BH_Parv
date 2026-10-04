@@ -22,6 +22,11 @@ const ( // Default values
 	defaultMaxStreamBuffer  = 65536   // 256KB
 	defaultSnifferLog       = "backhaul.json"
 	defaultMuxCon           = 8
+	// related to kcp
+	defaultKCPMode   = "fast"
+	defaultKCPMTU    = 1350
+	defaultKCPWnd    = 1024
+	defaultKCPSocket = 4194304
 )
 
 func applyDefaults(cfg *config.Config) {
@@ -122,5 +127,35 @@ func applyDefaults(cfg *config.Config) {
 	// Mux concurrancy
 	if cfg.Server.MuxCon < 1 {
 		cfg.Server.MuxCon = defaultMuxCon
+	}
+
+	// KCP
+	for _, k := range []*struct {
+		mode                              *string
+		mtu, snd, rcv, data, parity, sbuf *int
+	}{
+		{&cfg.Server.KCPMode, &cfg.Server.KCPMTU, &cfg.Server.KCPSndWnd, &cfg.Server.KCPRcvWnd, &cfg.Server.KCPDataShard, &cfg.Server.KCPParityShard, &cfg.Server.KCPSockBuf},
+		{&cfg.Client.KCPMode, &cfg.Client.KCPMTU, &cfg.Client.KCPSndWnd, &cfg.Client.KCPRcvWnd, &cfg.Client.KCPDataShard, &cfg.Client.KCPParityShard, &cfg.Client.KCPSockBuf},
+	} {
+		switch *k.mode {
+		case "normal", "fast", "fast2", "fast3":
+		default:
+			*k.mode = defaultKCPMode
+		}
+		if *k.mtu < 576 || *k.mtu > 1500 {
+			*k.mtu = defaultKCPMTU
+		}
+		if *k.snd <= 0 {
+			*k.snd = defaultKCPWnd
+		}
+		if *k.rcv <= 0 {
+			*k.rcv = defaultKCPWnd
+		}
+		if *k.data < 0 || *k.parity < 0 || (*k.data == 0) != (*k.parity == 0) {
+			*k.data, *k.parity = 0, 0 // FEC needs both values > 0, otherwise off
+		}
+		if *k.sbuf <= 0 {
+			*k.sbuf = defaultKCPSocket
+		}
 	}
 }

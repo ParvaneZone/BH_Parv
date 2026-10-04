@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/ParvaneZone/BH_Parv/config"
+	"github.com/gorilla/websocket"
 )
 
 func WebSocketDialer(ctx context.Context, addr string, edgeIP string, path string, timeout time.Duration, keepalive time.Duration, nodelay bool, token string, mode config.TransportType, retry int, SO_RCVBUF int, SO_SNDBUF int) (*websocket.Conn, error) {
