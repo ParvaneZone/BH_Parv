@@ -37,3 +37,5 @@ dist/
 server.*
 backhaul
 *.log
+backhaul
+backhaul_linux_*.tar.gz
