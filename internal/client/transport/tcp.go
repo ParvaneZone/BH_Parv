@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/musix/backhaul/internal/utils"
-	"github.com/musix/backhaul/internal/utils/handlers"
-	"github.com/musix/backhaul/internal/utils/network"
-	"github.com/musix/backhaul/internal/web"
+	"github.com/ParvaneZone/BH_Parv/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/utils/handlers"
+	"github.com/ParvaneZone/BH_Parv/internal/utils/network"
+	"github.com/ParvaneZone/BH_Parv/internal/web"
 
 	"github.com/sirupsen/logrus"
 )
@@ -132,7 +132,7 @@ func (c *TcpTransport) channelDialer() {
 			tunnelTCPConn, err := network.TcpDialer(c.ctx, c.config.RemoteAddr, "", c.config.DialTimeOut, c.config.KeepAlive, true, 3, 0, 0, 0)
 			if err != nil {
 				c.logger.Errorf("channel dialer: %v", err)
-				time.Sleep(c.config.RetryInterval)
+				time.Sleep(utils.Jitter(c.config.RetryInterval))
 				continue
 			}
 
@@ -160,13 +160,13 @@ func (c *TcpTransport) channelDialer() {
 					c.logger.Errorf("failed to receive control channel response: %v", err)
 				}
 				tunnelTCPConn.Close() // Close connection on error or timeout
-				time.Sleep(c.config.RetryInterval)
+				time.Sleep(utils.Jitter(c.config.RetryInterval))
 				continue
 			}
 			// Resetting the deadline (removes any existing deadline)
 			tunnelTCPConn.SetReadDeadline(time.Time{})
 
-			if message == c.config.Token {
+			if utils.TokenEqual(message, c.config.Token) {
 				c.controlChannel = tunnelTCPConn
 				c.logger.Info("control channel established successfully")
 
@@ -177,9 +177,9 @@ func (c *TcpTransport) channelDialer() {
 				return
 
 			} else {
-				c.logger.Errorf("invalid token received. Expected: %s, Received: %s. Retrying...", c.config.Token, message)
+				c.logger.Errorf("invalid token received from server. Retrying...")
 				tunnelTCPConn.Close() // Close connection if the token is invalid
-				time.Sleep(c.config.RetryInterval)
+				time.Sleep(utils.Jitter(c.config.RetryInterval))
 				continue
 			}
 		}

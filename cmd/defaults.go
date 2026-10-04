@@ -1,13 +1,12 @@
 package cmd
 
 import (
-	"github.com/musix/backhaul/config"
+	"github.com/ParvaneZone/BH_Parv/config"
 
 	"github.com/sirupsen/logrus"
 )
 
 const ( // Default values
-	defaultToken          = "musix"
 	defaultChannelSize    = 2048
 	defaultRetryInterval  = 3 // only for client
 	defaultConnectionPool = 8
@@ -26,13 +25,8 @@ const ( // Default values
 )
 
 func applyDefaults(cfg *config.Config) {
-	// Token
-	if cfg.Server.Token == "" {
-		cfg.Server.Token = defaultToken
-	}
-	if cfg.Client.Token == "" {
-		cfg.Client.Token = defaultToken
-	}
+	// Token: intentionally NO default. An empty token is rejected at startup
+	// (see validateToken in cmd.go) because a well-known default is a backdoor.
 
 	// Nodelay default is false if not valid value found
 

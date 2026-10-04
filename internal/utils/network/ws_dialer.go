@@ -2,7 +2,6 @@ package network
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"math/rand"
 	"net"
@@ -11,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/musix/backhaul/config"
+	"github.com/ParvaneZone/BH_Parv/config"
 )
 
 func WebSocketDialer(ctx context.Context, addr string, edgeIP string, path string, timeout time.Duration, keepalive time.Duration, nodelay bool, token string, mode config.TransportType, retry int, SO_RCVBUF int, SO_SNDBUF int) (*websocket.Conn, error) {
@@ -132,10 +131,8 @@ func attemptDialWebSocket(ctx context.Context, addr string, edgeIP string, path 
 	case config.WSS, config.WSSMUX:
 		wsURL = fmt.Sprintf("wss://%s%s", addr, path)
 
-		// Create a TLS configuration that allows insecure connections
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: true, // Skip server certificate verification
-		}
+		// TLS config honours tls_verify / tls_pin / tls_sni (see tls_options.go)
+		tlsConfig := BuildClientTLSConfig(addr)
 
 		dialer = websocket.Dialer{
 			EnableCompression: true,

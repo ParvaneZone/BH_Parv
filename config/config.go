@@ -42,6 +42,8 @@ type ServerConfig struct {
 	SO_RCVBUF        int           `toml:"so_rcvbuf"`
 	SO_SNDBUF        int           `toml:"so_sndbuf"`
 	ProxyProtocol    bool          `toml:"proxy_protocol"`
+	RestartInterval  int           `toml:"restart_interval"` // minutes, 0 = disabled
+	RestartAt        []string      `toml:"restart_at"`       // daily local times, e.g. ["04:30"]
 }
 
 // ClientConfig represents the configuration for the client.
@@ -70,6 +72,11 @@ type ClientConfig struct {
 	MSS              int           `toml:"mss"`
 	SO_RCVBUF        int           `toml:"so_rcvbuf"`
 	SO_SNDBUF        int           `toml:"so_sndbuf"`
+	TLSVerify        bool          `toml:"tls_verify"`       // wss/wssmux: verify server certificate
+	TLSPin           string        `toml:"tls_pin"`          // wss/wssmux: sha256 fingerprint of server cert (hex)
+	TLSSNI           string        `toml:"tls_sni"`          // wss/wssmux: custom SNI / server name
+	RestartInterval  int           `toml:"restart_interval"` // minutes, 0 = disabled
+	RestartAt        []string      `toml:"restart_at"`       // daily local times, e.g. ["04:30"]
 }
 
 // Config represents the complete configuration, including both server and client settings.

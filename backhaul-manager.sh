@@ -523,6 +523,7 @@ delete_tunnel() {
   sd stop "${SVC_PREFIX}${n}" 2>/dev/null
   sd disable "${SVC_PREFIX}${n}" >/dev/null 2>&1
   rm -f "$SVC_DIR/${SVC_PREFIX}${n}.service" "$CONF_DIR/$n.toml" "$CERT_DIR/$n.crt" "$CERT_DIR/$n.key"
+  rm -f "$ROOT/etc/cron.d/backhaul-restart-${n}"
   sd daemon-reload
   ok "Tunnel '$n' deleted."
 }
@@ -530,6 +531,42 @@ follow_logs() {
   trap ':' INT
   journalctl -fu "${SVC_PREFIX}$1" 2>/dev/null
   trap - INT
+}
+# --- Scheduled restart (built-in timer or system cron) ----------------------
+_cfg_clear_restart() { sed -i '/^[[:space:]]*restart_interval[[:space:]]*=/d;/^[[:space:]]*restart_at[[:space:]]*=/d' "$CONF_DIR/$1.toml"; }
+_cfg_add_line() { # $1 tunnel, $2 role, $3 line
+  sed -i "/^\[$2\]/a $3" "$CONF_DIR/$1.toml"
+}
+set_restart_schedule() {
+  local n="$1" role v hhmm cronfile
+  role=$(cfg_role "$n")
+  cronfile="$ROOT/etc/cron.d/backhaul-restart-$n"
+  echo
+  echo "${BD}Scheduled restart for: $n${N}"
+  echo "  1) Built-in: every N minutes  (restart_interval, needs systemd Restart=always)"
+  echo "  2) Built-in: daily at HH:MM   (restart_at,       needs systemd Restart=always)"
+  echo "  3) System cron: restart service on a cron schedule (/etc/cron.d)"
+  echo "  4) Remove all scheduled restarts for this tunnel"
+  echo "  0) Back"
+  read -r -p "Select: " v
+  case "$v" in
+    1) v=$(ask "Restart every how many minutes (e.g. 360 = 6h)" "360")
+       [[ $v =~ ^[0-9]+$ ]] && (( v > 0 )) || { err "Enter a positive number."; return; }
+       _cfg_clear_restart "$n"; _cfg_add_line "$n" "$role" "restart_interval = $v"
+       ok "Saved restart_interval = $v (applied on next restart of the tunnel)." ;;
+    2) hhmm=$(ask "Daily restart time, 24h HH:MM (server local time)" "04:30")
+       [[ $hhmm =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { err "Use HH:MM, e.g. 04:30."; return; }
+       _cfg_clear_restart "$n"; _cfg_add_line "$n" "$role" "restart_at = [\"$hhmm\"]"
+       ok "Saved restart_at = [\"$hhmm\"] (applied on next restart of the tunnel)." ;;
+    3) v=$(ask "Cron schedule (5 fields, e.g. '0 */6 * * *' = every 6 hours)" "0 */6 * * *")
+       [[ $v =~ ^[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+$ ]] || { err "Invalid cron expression."; return; }
+       mkdir -p "$ROOT/etc/cron.d"
+       printf 'SHELL=/bin/sh\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\n%s root systemctl restart %s%s\n' "$v" "$SVC_PREFIX" "$n" > "$cronfile"
+       chmod 644 "$cronfile"
+       ok "Cron installed: $cronfile" ;;
+    4) _cfg_clear_restart "$n"; rm -f "$cronfile"; ok "Scheduled restarts removed." ;;
+    *) return ;;
+  esac
 }
 manage_tunnel() {
   local n="$1" c role host
@@ -541,7 +578,8 @@ manage_tunnel() {
     echo "  1) Status              2) Last 60 log lines     3) Follow logs (Ctrl+C to stop)"
     echo "  4) Restart             5) Stop                  6) Start"
     [[ $role == server ]] && echo "  7) Change forwarded ports  8) Show client connection string"
-    echo "  9) Show config        10) Edit config           11) Delete tunnel   0) Back"
+    echo "  9) Show config        10) Edit config           11) Delete tunnel"
+    echo " 12) Scheduled restart (cron / timer)   0) Back"
     read -r -p "Select: " c
     case "$c" in
       1) systemctl status "${SVC_PREFIX}${n}" --no-pager 2>/dev/null | head -15 ;;
@@ -560,6 +598,7 @@ manage_tunnel() {
       10) ${EDITOR:-$(command -v nano || echo vi)} "$CONF_DIR/$n.toml"
           ask_yn "Restart the tunnel to apply changes?" y && { sd restart "${SVC_PREFIX}${n}"; verify_start "$n"; } ;;
       11) delete_tunnel "$n"; [[ -e "$CONF_DIR/$n.toml" ]] || return ;;
+      12) set_restart_schedule "$n" ;;
       0) return ;;
       *) err "Invalid choice." ;;
     esac

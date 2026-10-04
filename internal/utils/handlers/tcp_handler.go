@@ -5,10 +5,19 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 
-	"github.com/musix/backhaul/internal/web"
+	"github.com/ParvaneZone/BH_Parv/internal/web"
 	"github.com/sirupsen/logrus"
 )
+
+// bufPool reuses 32KB copy buffers instead of allocating one per direction per connection.
+var bufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
 
 func TCPConnectionHandler(ctx context.Context, proxyProtocol bool, from net.Conn, to net.Conn, logger *logrus.Logger, usage *web.Usage, remotePort int, sniffer bool) {
 	done := make(chan struct{})
@@ -42,7 +51,9 @@ func TCPConnectionHandler(ctx context.Context, proxyProtocol bool, from net.Conn
 
 // Using direct Read and Write for transferring data
 func transferData(from net.Conn, to net.Conn, logger *logrus.Logger, usage *web.Usage, remotePort int, sniffer bool) {
-	buf := make([]byte, 16*1024) // 16K
+	bp := bufPool.Get().(*[]byte)
+	defer bufPool.Put(bp)
+	buf := *bp
 	for {
 		// Read data from the source connection
 		r, err := from.Read(buf)

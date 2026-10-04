@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/musix/backhaul/internal/utils"
-	"github.com/musix/backhaul/internal/web"
+	"github.com/ParvaneZone/BH_Parv/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/web"
 	"github.com/sirupsen/logrus"
 )
 

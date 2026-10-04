@@ -4,11 +4,12 @@ import (
 	"context"
 	"time"
 
-	"github.com/musix/backhaul/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/utils/network"
 
-	"github.com/musix/backhaul/config"
+	"github.com/ParvaneZone/BH_Parv/config"
 
-	"github.com/musix/backhaul/internal/client/transport"
+	"github.com/ParvaneZone/BH_Parv/internal/client/transport"
 
 	"net/http"
 	_ "net/http/pprof"
@@ -42,6 +43,15 @@ func (c *Client) Start() {
 			c.logger.Info("pprof started at port 6061")
 			http.ListenAndServe("0.0.0.0:6061", nil)
 		}()
+	}
+
+	network.SetTLSOptions(network.TLSOptions{
+		Verify: c.config.TLSVerify,
+		Pin:    c.config.TLSPin,
+		SNI:    c.config.TLSSNI,
+	})
+	if (c.config.Transport == config.WSS || c.config.Transport == config.WSSMUX) && !c.config.TLSVerify && c.config.TLSPin == "" {
+		c.logger.Warn("wss without tls_verify or tls_pin: the server certificate is NOT validated (MITM possible). Set tls_pin to the server certificate sha256 fingerprint.")
 	}
 
 	c.logger.Infof("client with remote address %s started successfully", c.config.RemoteAddr)

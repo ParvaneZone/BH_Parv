@@ -8,11 +8,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/musix/backhaul/config"
-	"github.com/musix/backhaul/internal/utils"
-	"github.com/musix/backhaul/internal/utils/handlers"
-	"github.com/musix/backhaul/internal/utils/network"
-	"github.com/musix/backhaul/internal/web"
+	"github.com/ParvaneZone/BH_Parv/config"
+	"github.com/ParvaneZone/BH_Parv/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/utils/handlers"
+	"github.com/ParvaneZone/BH_Parv/internal/utils/network"
+	"github.com/ParvaneZone/BH_Parv/internal/web"
 	"github.com/xtaci/smux"
 
 	"github.com/gorilla/websocket"
@@ -147,7 +147,7 @@ func (c *WsMuxTransport) channelDialer() {
 			tunnelWSConn, err := network.WebSocketDialer(c.ctx, c.config.RemoteAddr, c.config.EdgeIP, "/channel", c.config.DialTimeOut, c.config.KeepAlive, true, c.config.Token, c.config.Mode, 3, 0, 0)
 			if err != nil {
 				c.logger.Errorf("control channel dialer: %v", err)
-				time.Sleep(c.config.RetryInterval)
+				time.Sleep(utils.Jitter(c.config.RetryInterval))
 				continue
 			}
 			c.controlChannel = tunnelWSConn

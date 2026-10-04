@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/musix/backhaul/internal/utils"
-	"github.com/musix/backhaul/internal/utils/handlers"
-	"github.com/musix/backhaul/internal/utils/network"
-	"github.com/musix/backhaul/internal/web"
+	"github.com/ParvaneZone/BH_Parv/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/utils/handlers"
+	"github.com/ParvaneZone/BH_Parv/internal/utils/network"
+	"github.com/ParvaneZone/BH_Parv/internal/web"
 
 	"github.com/sirupsen/logrus"
 )
@@ -176,7 +176,7 @@ func (s *TcpTransport) channelHandshake() {
 			// Resetting the deadline (removes any existing deadline)
 			conn.SetReadDeadline(time.Time{})
 
-			if msg != s.config.Token {
+			if !utils.TokenEqual(msg, s.config.Token) {
 				s.logger.Warnf("invalid security token received: %s", msg)
 				conn.Close()
 				continue

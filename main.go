@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/musix/backhaul/cmd"
-	"github.com/musix/backhaul/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/cmd"
+	"github.com/ParvaneZone/BH_Parv/internal/utils"
 )
 
 var (

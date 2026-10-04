@@ -3,11 +3,11 @@ package cmd
 import (
 	"context"
 
-	"github.com/musix/backhaul/config"
-	"github.com/musix/backhaul/internal/client"
+	"github.com/ParvaneZone/BH_Parv/config"
+	"github.com/ParvaneZone/BH_Parv/internal/client"
 
-	"github.com/musix/backhaul/internal/server"
-	"github.com/musix/backhaul/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/server"
+	"github.com/ParvaneZone/BH_Parv/internal/utils"
 
 	"github.com/BurntSushi/toml"
 )
@@ -43,8 +43,11 @@ func Run(configPath string, ctx context.Context) {
 			ApplyTCPTuning()
 		}
 
+		validateToken("server", cfg.Server.Token)
+
 		srv := server.NewServer(&cfg.Server, ctx) // server
 		go srv.Start()
+		scheduleRestart(ctx, cfg.Server.RestartInterval, cfg.Server.RestartAt, srv.Stop)
 
 		// Wait for shutdown signal
 		<-ctx.Done()
@@ -56,8 +59,11 @@ func Run(configPath string, ctx context.Context) {
 			ApplyTCPTuning()
 		}
 
+		validateToken("client", cfg.Client.Token)
+
 		clnt := client.NewClient(&cfg.Client, ctx) // client
 		go clnt.Start()
+		scheduleRestart(ctx, cfg.Client.RestartInterval, cfg.Client.RestartAt, clnt.Stop)
 
 		// Wait for shutdown signal
 		<-ctx.Done()

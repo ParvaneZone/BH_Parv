@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/musix/backhaul/internal/utils"
-	"github.com/musix/backhaul/internal/web"
+	"github.com/ParvaneZone/BH_Parv/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/web"
 	"github.com/sirupsen/logrus"
 )
 
@@ -166,7 +166,7 @@ loop:
 			// Resetting the deadline (removes any existing deadline)
 			conn.SetReadDeadline(time.Time{})
 
-			if msg != s.config.Token {
+			if !utils.TokenEqual(msg, s.config.Token) {
 				s.logger.Warnf("invalid security token received: %s", msg)
 				conn.Close()
 				continue
@@ -327,7 +327,7 @@ func (s *UdpTransport) acceptTunnelConn(listener *net.UDPConn) {
 
 			s.activeMu.Unlock()
 
-			if string(buf[:n]) != s.config.Token { // For new connections, validate the token
+			if !utils.TokenEqual(string(buf[:n]), s.config.Token) { // For new connections, validate the token
 				s.logger.Errorf("invalid token received from %s", addr.String())
 				continue
 			}

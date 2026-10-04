@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/musix/backhaul/config"
-	"github.com/musix/backhaul/internal/utils"
-	"github.com/musix/backhaul/internal/utils/handlers"
-	"github.com/musix/backhaul/internal/web"
+	"github.com/ParvaneZone/BH_Parv/config"
+	"github.com/ParvaneZone/BH_Parv/internal/utils"
+	"github.com/ParvaneZone/BH_Parv/internal/utils/handlers"
+	"github.com/ParvaneZone/BH_Parv/internal/web"
 
 	"github.com/gorilla/websocket"
 	"github.com/sirupsen/logrus"
@@ -220,7 +220,7 @@ func (s *WsTransport) tunnelListener() {
 
 			// Read the "Authorization" header
 			authHeader := r.Header.Get("Authorization")
-			if authHeader != fmt.Sprintf("Bearer %v", s.config.Token) {
+			if !utils.TokenEqual(authHeader, fmt.Sprintf("Bearer %v", s.config.Token)) {
 				s.logger.Warnf("unauthorized request from %s, closing connection", r.RemoteAddr)
 				http.Error(w, "unauthorized", http.StatusUnauthorized) // Send 401 Unauthorized response
 				return
