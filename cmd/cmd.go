@@ -43,7 +43,7 @@ func Run(configPath string, ctx context.Context) {
 			ApplyTCPTuning()
 		}
 
-		validateToken("server", cfg.Server.Token)
+		validateTokenFor("server", cfg.Server.Token, string(cfg.Server.Transport))
 
 		srv := server.NewServer(&cfg.Server, ctx) // server
 		go srv.Start()
@@ -59,7 +59,7 @@ func Run(configPath string, ctx context.Context) {
 			ApplyTCPTuning()
 		}
 
-		validateToken("client", cfg.Client.Token)
+		validateTokenFor("client", cfg.Client.Token, string(cfg.Client.Transport))
 
 		clnt := client.NewClient(&cfg.Client, ctx) // client
 		go clnt.Start()

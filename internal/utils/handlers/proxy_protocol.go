@@ -13,9 +13,12 @@ func WriteProxyProtocol(from, to net.Conn) error {
 	if !ok {
 		return fmt.Errorf("source connection address is not a TCP address")
 	}
-	dstAddr, ok := to.RemoteAddr().(*net.TCPAddr)
+	// Destination = the local address the original client connected to. (Using
+	// to.RemoteAddr() broke on UDP-based transports such as kcpmux, where the
+	// peer address is a *net.UDPAddr.)
+	dstAddr, ok := from.LocalAddr().(*net.TCPAddr)
 	if !ok {
-		return fmt.Errorf("destination connection address is not a TCP address")
+		return fmt.Errorf("local address of the incoming connection is not a TCP address")
 	}
 
 	header, err := buildProxyProtocolV2Header(srcAddr.IP.String(), dstAddr.IP.String(), srcAddr.Port, dstAddr.Port)

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
+      - name: Test (race)
+        run: go test -race ./...
+      - name: gofmt (informational)
+        continue-on-error: true
+        run: test -z "$(gofmt -l .)"
+
+  shell:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax
+        run: |
+          bash -n backhaul-manager.sh
+          bash -n install.sh
+          bash -n backhaul.sh
+      - name: ShellCheck (errors only)
+        run: shellcheck -S error backhaul-manager.sh install.sh backhaul.sh

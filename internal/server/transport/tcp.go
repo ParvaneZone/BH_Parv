@@ -462,7 +462,7 @@ func (s *TcpTransport) startListeners(localAddr, remoteAddr string) {
 func (s *TcpTransport) localListener(localAddr string, remoteAddr string) {
 	listener, err := net.Listen("tcp", localAddr)
 	if err != nil {
-		s.logger.Fatalf("failed to listen on %s: %v", localAddr, err)
+		s.logger.Errorf("failed to listen on %s (skipping this port, tunnel keeps running): %v", localAddr, err)
 		return
 	}
 

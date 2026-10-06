@@ -67,6 +67,13 @@ func NewKcpMuxServer(parentCtx context.Context, config *KcpMuxConfig, logger *lo
 	// Create a derived context from the parent context
 	ctx, cancel := context.WithCancel(parentCtx)
 
+	// The client declares the control channel dead after 120s of silence, so the
+	// heartbeat must be comfortably shorter than that.
+	if config.Heartbeat <= 0 || config.Heartbeat > 40*time.Second {
+		logger.Warnf("kcpmux: heartbeat clamped to 40s (client watchdog timeout is 120s)")
+		config.Heartbeat = 40 * time.Second
+	}
+
 	// Initialize the TcpTransport struct
 	server := &KcpMuxTransport{
 		smuxConfig: &smux.Config{
@@ -353,9 +360,22 @@ func (s *KcpMuxTransport) admitSession(conn net.Conn) {
 		return
 	}
 	msg, sig, err := utils.ReceiveBinaryTransportString(conn)
-	if err != nil || sig != utils.SG_TCP || !utils.TokenEqual(msg, s.config.Token) {
+	if err != nil || (sig != utils.SG_TCP && sig != utils.SG_Chan) || !utils.TokenEqual(msg, s.config.Token) {
 		s.logger.Debugf("invalid hello from tunnel session %s, discarding", conn.RemoteAddr().String())
 		conn.Close()
+		return
+	}
+	if sig == utils.SG_Chan {
+		// An authenticated peer (same IP, valid token) is opening a NEW control
+		// channel: its previous one is dead (e.g. the client restarted). KCP gives
+		// no disconnect signal, so tear the old state down; the client retries and
+		// reaches the fresh handshake after the restart.
+		s.logger.Warn("new control channel requested by the peer, restarting server state")
+		conn.Close()
+		if cc := s.controlChannel; cc != nil {
+			cc.Close()
+		}
+		go s.Restart()
 		return
 	}
 	conn.SetReadDeadline(time.Time{})
@@ -469,7 +489,7 @@ func (s *KcpMuxTransport) parsePortMappings() {
 func (s *KcpMuxTransport) localListener(localAddr string, remoteAddr string) {
 	listener, err := net.Listen("tcp", localAddr)
 	if err != nil {
-		s.logger.Fatalf("failed to start listener on %s: %v", localAddr, err)
+		s.logger.Errorf("failed to start listener on %s (skipping this port, tunnel keeps running): %v", localAddr, err)
 		return
 	}
 

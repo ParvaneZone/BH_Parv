@@ -481,7 +481,7 @@ func (s *TcpMuxTransport) parsePortMappings() {
 func (s *TcpMuxTransport) localListener(localAddr string, remoteAddr string) {
 	listener, err := net.Listen("tcp", localAddr)
 	if err != nil {
-		s.logger.Fatalf("failed to start listener on %s: %v", localAddr, err)
+		s.logger.Errorf("failed to start listener on %s (skipping this port, tunnel keeps running): %v", localAddr, err)
 		return
 	}
 
