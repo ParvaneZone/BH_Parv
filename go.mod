@@ -1,6 +1,6 @@
 module github.com/ParvaneZone/BH_Parv
 
-go 1.24.0
+go 1.26.0
 
 require (
 	github.com/BurntSushi/toml v1.4.0
@@ -9,7 +9,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3
 	github.com/xtaci/kcp-go/v5 v5.6.72
 	github.com/xtaci/smux v1.5.27
-	golang.org/x/crypto v0.45.0
+	golang.org/x/crypto v0.57.0
 )
 
 require (
@@ -24,7 +24,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.14 // indirect
 	github.com/tklauser/numcpus v0.8.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/net v0.47.0 // indirect
-	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
