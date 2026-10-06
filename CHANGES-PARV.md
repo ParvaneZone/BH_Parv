@@ -1,4 +1,4 @@
-# BH_Parv changes (on top of Backhaul v0.7.2)
+# BH_Parv changes (fork of Musixal/Backhaul; binary reports v0.7.4)
 
 > These changes were written WITHOUT a Go toolchain available. Before use run:
 > `go mod tidy && go vet ./... && go build ./...` and test on a staging pair of servers.
@@ -53,3 +53,40 @@
 - pprof (6060/6061) and the web panel bind to 127.0.0.1 only (use `ssh -L` for remote access).
 - systemd unit: NoNewPrivileges, PrivateTmp, ProtectHome.
 - goreleaser: v2 `formats`, `ldflags`; linux amd64/arm64 only (matches the manager). Removed dead `httpserver.go`.
+
+## Round 3 - review fixes (STILL not compiled or run by the author of this round: no Go toolchain, no network)
+Run `go mod tidy && go vet ./... && go build ./... && go test -race ./...` before using anything. The new
+`.github/workflows/ci.yml` does exactly that on every push.
+
+### kcpmux
+- Client: control channel now has a 120 s read deadline. UDP has no RST/keepalive, so a restarted/dead server
+  used to leave the client blocked forever. Server heartbeat is clamped to <= 40 s for kcpmux (manager caps it too).
+- Server: an authenticated peer (same IP + valid token) that opens a NEW control channel (e.g. client restarted)
+  now makes the server tear down the dead one and re-handshake, instead of silently discarding it.
+- `proxy_protocol = true` no longer breaks every connection on kcpmux: the PROXY v2 destination is taken from
+  the incoming connection's local address instead of the tunnel peer's (UDP) address.
+- Token shorter than 12 chars is now a hard error for kcpmux (the token is the only source of the AES key).
+- KNOWN LIMITS (not fixed, needs a protocol change): kcp-go encryption has no real MAC (CRC32 only); the session
+  filter is by source IP only; KCP traffic is random-looking UDP with no protocol mimicry.
+
+### Robustness
+- A forwarded port that cannot be bound (in use, bad range member) is logged and skipped; it no longer kills the
+  whole tunnel (`Fatalf` -> `Errorf` in all `localListener`s).
+
+### Manager / installer
+- `valid_spec` now accepts exactly what the binary parses (PORT, A-B, LOCAL=PORT, LOCAL=HOST:PORT, IPv4:PORT=...)
+  and range-checks ports. `4000:5000`, `1.2.3.4:443`, `99999`, `600-443` are rejected (they used to crash-loop the service).
+- Ports are de-duplicated; `parse_conn_string` validates host, port, token, mux version.
+- Default transport is now `wssmux` (pinned TLS). Plaintext transports (tcp, tcpmux, udp, ws, wsmux) are labelled
+  and trigger a warning: the token and traffic are visible on the wire. A wss client without `tls_pin` now needs explicit confirmation.
+- TLS certificate CN is random instead of the fixed `backhaul-<name>`.
+- Binary install: `BH_VERSION=vX.Y.Z` pins a release; optional independent SHA-256 (`BH_SHA256` or prompt) for
+  every source; custom URL must be https; archives with absolute/`..` paths are refused.
+  NOTE: `checksums.txt` comes from the same release as the binary, so it only detects corruption, not a tampered release.
+- `install.sh` / `ParvBH` update: `BH_REF=<tag-or-commit>` pins the script, syntax check, prints SHA-256, update asks for confirmation.
+- Config files are created under `umask 077`; uninstall also removes the cron.d restart files.
+- Messages fixed: Go >= 1.24 (matches go.mod); config edits are hot-reloaded within seconds (not "on next restart").
+
+### Tests / CI
+- Added unit tests (restart schedule, KCP defaults, token/jitter/fingerprint helpers, PROXY v2 header, KCP key derivation).
+- Added CI (tidy check, vet, build, race tests, bash -n, shellcheck).

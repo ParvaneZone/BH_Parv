@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-set -e
+set -eo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/ParvaneZone/BH_Parv/main/backhaul-manager.sh"
+# Pin a tag/commit with BH_REF (e.g. BH_REF=v0.7.4-parv1); defaults to main.
+REF="${BH_REF:-main}"
+[[ $REF =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "Invalid BH_REF." >&2; exit 1; }
+REPO_RAW="https://raw.githubusercontent.com/ParvaneZone/BH_Parv/${REF}/backhaul-manager.sh"
 DEST="/usr/local/bin/ParvBH"
 
 if [[ $EUID -ne 0 ]]; then
@@ -20,8 +23,12 @@ if ! command -v curl >/dev/null 2>&1; then
   fi
 fi
 
-curl -fsSL --proto '=https' --tlsv1.2 "$REPO_RAW" -o "$DEST"
-chmod +x "$DEST"
+TMP="$(mktemp)"
+curl -fsSL --proto '=https' --tlsv1.2 "$REPO_RAW" -o "$TMP"
+bash -n "$TMP" || { echo "Downloaded manager failed a syntax check; aborting." >&2; rm -f "$TMP"; exit 1; }
+echo "Manager SHA-256: $(sha256sum "$TMP" | awk '{print $1}')"
+install -m 755 "$TMP" "$DEST"
+rm -f "$TMP"
 
 echo "Installed. From anywhere on this server, run: ParvBH"
 exec "$DEST"

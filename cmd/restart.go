@@ -72,6 +72,16 @@ func scheduleRestart(ctx context.Context, intervalMin int, at []string, stop fun
 
 // validateToken refuses to run without a token and warns about weak ones.
 func validateToken(role, token string) {
+	validateTokenFor(role, token, "")
+}
+
+// validateTokenFor is validateToken plus a hard minimum for kcpmux, where the
+// token is the only source of the AES key (a short token is brute-forceable
+// offline from captured packets).
+func validateTokenFor(role, token string, transport string) {
+	if transport == "kcpmux" && len(token) < 12 {
+		logger.Fatalf("%s token is too short for kcpmux: use at least 12 random characters (e.g. `openssl rand -hex 16`)", role)
+	}
 	if token == "" {
 		logger.Fatalf("%s token is empty: set a strong 'token' in the config (there is no default token)", role)
 	}

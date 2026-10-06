@@ -169,9 +169,38 @@ ask_tunnel_port() {
     echo "$v"; return
   done
 }
+_port_ok() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+_ipv4_ok() {
+  local re='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$' i
+  [[ $1 =~ $re ]] || return 1
+  for i in 1 2 3 4; do (( 10#${BASH_REMATCH[$i]} <= 255 )) || return 1; done
+}
+# Accepts exactly what the backhaul binary understands:
+#   PORT | START-END | LOCAL=PORT | LOCAL=HOST:PORT   where LOCAL = PORT | START-END | IPv4:PORT
 valid_spec() {
-  local re='^([0-9]{1,3}(\.[0-9]{1,3}){3}:)?[0-9]{1,5}(-[0-9]{1,5})?((=|:)([A-Za-z0-9.-]+:)?[0-9]{1,5})?$'
-  [[ $1 =~ $re ]]
+  local s="$1" l r="" ip a b
+  if [[ $s == *=* ]]; then
+    l="${s%%=*}"; r="${s#*=}"
+    [[ -n $r && $r != *=* ]] || return 1
+    if [[ $r == *:* ]]; then
+      [[ ${r%:*} =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] && _port_ok "${r##*:}" || return 1
+    else
+      _port_ok "$r" || return 1
+    fi
+  else
+    l="$s"
+  fi
+  if [[ $l == *:* ]]; then                      # IPv4:PORT (only valid together with '=')
+    [[ -n $r ]] || return 1
+    ip="${l%:*}"; _ipv4_ok "$ip" && _port_ok "${l##*:}" || return 1
+  elif [[ $l == *-* ]]; then                    # range
+    a="${l%%-*}"; b="${l##*-}"
+    _port_ok "$a" && _port_ok "$b" && (( 10#$a <= 10#$b )) || return 1
+  else                                          # single port
+    _port_ok "$l" || return 1
+    # the binary treats "1=..." and "65535=..." as an address, not a port
+    [[ -z $r ]] || (( 10#$l > 1 && 10#$l < 65535 )) || return 1
+  fi
 }
 ask_ports() {
   {
@@ -191,6 +220,7 @@ ask_ports() {
     printf '%s\n' "${arr[@]}"; return
   done
 }
+uniq_lines() { awk 'NF && !seen[$0]++'; }
 spec_local() {
   local s="$1" l
   if [[ $s == *=* ]]; then l="${s%%=*}"
@@ -219,7 +249,8 @@ get_ports() {
 }
 set_ports() {
   local n="$1"; shift
-  local f="$CONF_DIR/$n.toml" tmp p
+  local f="$CONF_DIR/$n.toml" tmp p um
+  um=$(umask); umask 077
   tmp=$(mktemp)
   awk '/^ports[[:space:]]*=[[:space:]]*\[.*\]/{next}
        /^ports[[:space:]]*=[[:space:]]*\[/{s=1;next}
@@ -231,7 +262,7 @@ set_ports() {
     for p in "$@"; do echo "  \"$p\","; done
     echo "]"
   } >"$f"
-  rm -f "$tmp"; chmod 600 "$f"
+  rm -f "$tmp"; chmod 600 "$f"; umask "$um"
 }
 next_name() { local i=1; while [[ -e "$CONF_DIR/tunnel$i.toml" ]]; do i=$((i + 1)); done; echo "tunnel$i"; }
 ask_name() {
@@ -266,17 +297,23 @@ is_udp_based() { [[ $TRANSPORT == udp || $TRANSPORT == kcpmux ]]; }
 is_tls() { [[ $TRANSPORT == wss || $TRANSPORT == wssmux ]]; }
 is_ws()  { [[ $TRANSPORT == ws* ]]; }
 
+is_plain() { [[ $TRANSPORT =~ ^(tcp|tcpmux|udp|ws|wsmux)$ ]]; }
+warn_plain() {
+  is_plain || return 0
+  warn "'$TRANSPORT' is NOT encrypted: the token and all tunnel traffic are visible to anyone on the path." >&2
+  warn "Prefer wssmux / wss / kcpmux, or make sure the traffic you forward is encrypted itself." >&2
+}
 ask_transport() {
   echo "Transport type:" >&2
-  choose "Select" 1 \
-    "tcp|tcp - simple and fast (good default)" \
-    "tcpmux|tcpmux - many sessions over one TCP connection" \
-    "udp|udp - UDP transport" \
+  choose "Select" 8 \
+    "tcp|tcp - plaintext, simple and fast (token visible on the wire)" \
+    "tcpmux|tcpmux - plaintext, many sessions over one TCP connection" \
+    "udp|udp - plaintext UDP transport" \
     "kcpmux|kcpmux - KCP over UDP + multiplexing (fast on lossy links, needs UDP open)" \
-    "ws|ws - WebSocket (passes HTTP-only firewalls / CDN)" \
+    "ws|ws - plaintext WebSocket (passes HTTP-only firewalls / CDN)" \
     "wss|wss - WebSocket + TLS (encrypted)" \
-    "wsmux|wsmux - WebSocket + multiplexing" \
-    "wssmux|wssmux - WebSocket + TLS + multiplexing"
+    "wsmux|wsmux - plaintext WebSocket + multiplexing" \
+    "wssmux|wssmux - WebSocket + TLS + multiplexing (default; certificate pinned automatically)"
 }
 ask_kcp_advanced() {
   KCP_MODE=$(choose "kcp_mode (fast = good default; fast3 = lowest latency, most bandwidth)" 2 \
@@ -300,13 +337,17 @@ parse_conn_string() {
   d=$(printf '%s' "$s" | base64 -d 2>/dev/null) || return 1
   IFS='|' read -r TRANSPORT SRV_HOST SRV_PORT TOKEN MUX_VER TLS_PIN <<<"$d"
   [[ $TRANSPORT =~ ^(tcp|tcpmux|udp|kcpmux|ws|wss|wsmux|wssmux)$ ]] || return 1
-  [[ -n $SRV_HOST && $SRV_PORT =~ ^[0-9]+$ && -n $TOKEN ]] || return 1
+  [[ $SRV_HOST =~ ^[A-Za-z0-9._:-]+$ ]] || return 1       # IPv4 / IPv6 / hostname only
+  _port_ok "$SRV_PORT" || return 1
+  [[ -n $TOKEN ]] && valid_token "$TOKEN" || return 1
   MUX_VER="${MUX_VER:-1}"
+  [[ $MUX_VER =~ ^[12]$ ]] || return 1
   [[ -z $TLS_PIN || $TLS_PIN =~ ^[0-9a-f]{64}$ ]] || return 1
 }
 
 write_server_conf() {
-  local f="$CONF_DIR/$NAME.toml" p
+  local f="$CONF_DIR/$NAME.toml" p um
+  um=$(umask); umask 077
   mkdir -p "$CONF_DIR"
   {
     echo "[server]"
@@ -339,10 +380,11 @@ write_server_conf() {
     for p in "${PORTS[@]}"; do echo "  \"$p\","; done
     echo "]"
   } >"$f"
-  chmod 600 "$f"
+  chmod 600 "$f"; umask "$um"
 }
 write_client_conf() {
-  local f="$CONF_DIR/$NAME.toml" host="$SRV_HOST"
+  local f="$CONF_DIR/$NAME.toml" host="$SRV_HOST" um
+  um=$(umask); umask 077
   [[ $host == *:* && $host != \[* ]] && host="[$host]"
   mkdir -p "$CONF_DIR"
   {
@@ -371,14 +413,14 @@ write_client_conf() {
     echo "web_port = ${WEB_PORT}"
     echo "log_level = \"${LOG_LEVEL}\""
   } >"$f"
-  chmod 600 "$f"
+  chmod 600 "$f"; umask "$um"
 }
 make_cert() {
   ensure_deps openssl || return 1
   mkdir -p "$CERT_DIR"
   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
     -keyout "$CERT_DIR/$1.key" -out "$CERT_DIR/$1.crt" \
-    -subj "/CN=backhaul-$1" >/dev/null 2>&1 || { err "Certificate generation failed."; return 1; }
+    -subj "/CN=$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')" >/dev/null 2>&1 || { err "Certificate generation failed."; return 1; }
   chmod 600 "$CERT_DIR/$1.key"
   ok "Self-signed TLS certificate created for '$1'."
 }
@@ -451,6 +493,21 @@ verify_checksum() { # $1 file, $2 asset name in checksums.txt
   err "Checksum MISMATCH (expected $exp, got $got). The download is corrupted or tampered with."
   return 1
 }
+# Optional independent integrity check. checksums.txt comes from the same release as the
+# binary, so it only detects corruption; a SHA-256 you obtained from another trusted
+# channel (or BH_SHA256) protects against a tampered release.
+verify_pinned_sha() { # $1 file
+  local exp="${BH_SHA256:-}" got
+  if [[ -z $exp ]]; then
+    exp=$(ask "Expected SHA-256 of this file from a trusted source (Enter = skip, NOT recommended)" "")
+  fi
+  exp=$(printf '%s' "$exp" | tr -d ' ' | tr 'A-F' 'a-f')
+  [[ -z $exp ]] && { warn "No independent SHA-256 given."; return 0; }
+  [[ $exp =~ ^[0-9a-f]{64}$ ]] || { err "Not a valid SHA-256."; return 1; }
+  got=$(sha256sum "$1" | awk '{print $1}')
+  [[ $exp == "$got" ]] && { ok "Pinned SHA-256 matches."; return 0; }
+  err "SHA-256 MISMATCH (expected $exp, got $got)."; return 1
+}
 install_binary() {
   ensure_deps curl tar sha256sum || return 1
   mkdir -p "$(dirname "$BIN")"
@@ -461,25 +518,34 @@ install_binary() {
     "gh|GitHub latest release (needs access to github.com)" \
     "url|Custom URL / mirror (.tar.gz or raw binary)" \
     "file|Local file on this machine (.tar.gz or raw binary)" \
-    "src|Build from source (needs git and Go >= 1.23.1)")
+    "src|Build from source (needs git and Go >= 1.24)")
   tmp=$(mktemp -d)
   case "$choice" in
     gh)
       [[ $arch == unknown ]] && { err "Unsupported CPU: $(uname -m). Use another option."; rm -rf "$tmp"; return 1; }
-      url="https://github.com/${GH_REPO}/releases/latest/download/backhaul_linux_${arch}.tar.gz"
+      if [[ -n ${BH_VERSION:-} ]]; then
+        [[ $BH_VERSION =~ ^v[0-9][A-Za-z0-9._-]*$ ]] || { err "BH_VERSION must look like v0.7.4"; rm -rf "$tmp"; return 1; }
+        url="https://github.com/${GH_REPO}/releases/download/${BH_VERSION}/backhaul_linux_${arch}.tar.gz"
+      else
+        url="https://github.com/${GH_REPO}/releases/latest/download/backhaul_linux_${arch}.tar.gz"
+        warn "Installing 'latest'. Set BH_VERSION=vX.Y.Z to pin a version."
+      fi
       info "Downloading $url"
       curl -fL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 -o "$tmp/pkg" "$url" || { err "Download failed."; rm -rf "$tmp"; return 1; }
       verify_checksum "$tmp/pkg" "backhaul_linux_${arch}.tar.gz" || { rm -rf "$tmp"; return 1; }
+      verify_pinned_sha "$tmp/pkg" || { rm -rf "$tmp"; return 1; }
       ;;
     url)
       url=$(ask "URL" "")
-      [[ -z $url ]] && { rm -rf "$tmp"; return 1; }
-      curl -fL --retry 3 --connect-timeout 15 -o "$tmp/pkg" "$url" || { err "Download failed."; rm -rf "$tmp"; return 1; }
+      [[ $url == https://* ]] || { err "Only https:// URLs are accepted."; rm -rf "$tmp"; return 1; }
+      curl -fL --proto '=https' --tlsv1.2 --retry 3 --connect-timeout 15 -o "$tmp/pkg" "$url" || { err "Download failed."; rm -rf "$tmp"; return 1; }
+      verify_pinned_sha "$tmp/pkg" || { rm -rf "$tmp"; return 1; }
       ;;
     file)
       file=$(ask "Path to file" "")
       [[ -f $file ]] || { err "File not found."; rm -rf "$tmp"; return 1; }
       cp "$file" "$tmp/pkg"
+      verify_pinned_sha "$tmp/pkg" || { rm -rf "$tmp"; return 1; }
       ;;
     src)
       command -v git >/dev/null 2>&1 && command -v go >/dev/null 2>&1 || { err "git and go are required."; rm -rf "$tmp"; return 1; }
@@ -488,6 +554,9 @@ install_binary() {
       ;;
   esac
   if tar -tzf "$tmp/pkg" >/dev/null 2>&1; then
+    if tar -tzf "$tmp/pkg" | grep -qE '(^/|(^|/)\.\.(/|$))'; then
+      err "Archive contains absolute or '..' paths - refusing to extract."; rm -rf "$tmp"; return 1
+    fi
     mkdir -p "$tmp/x"; tar -xzf "$tmp/pkg" -C "$tmp/x"
     bin=$(find "$tmp/x" -type f -name backhaul | head -1)
     [[ -z $bin ]] && { err "No 'backhaul' binary inside the archive."; rm -rf "$tmp"; return 1; }
@@ -506,17 +575,18 @@ new_server_tunnel() {
   echo; echo "${BD}== New tunnel: SERVER side (Iran) ==${N}"
   NAME=$(ask_name)
   TRANSPORT=$(ask_transport)
+  warn_plain
   [[ $TRANSPORT == udp ]] && HEARTBEAT=20
   local proto=tcp; is_udp_based && proto=udp
   is_kcp && warn "kcpmux needs UDP open between the servers. Test it first from the main menu (option 8)."
   TUN_PORT=$(ask_tunnel_port "$(next_free_port 3080 "$proto")" "$proto")
   TOKEN=$(ask_token)
-  mapfile -t PORTS < <(ask_ports)
+  mapfile -t PORTS < <(ask_ports | uniq_lines)
   if [[ $TRANSPORT == tcp ]] && ask_yn "Also forward UDP through this TCP tunnel (accept_udp)?" n; then ACCEPT_UDP=true; fi
   if ask_yn "Change advanced settings?" n; then
     [[ $TRANSPORT != udp ]] && { ask_yn "nodelay (lower latency, less bandwidth)?" y || NODELAY=false; }
     KEEPALIVE=$(ask_int "keepalive_period (s)" "$KEEPALIVE" 1 3600)
-    HEARTBEAT=$(ask_int "heartbeat (s)" "$HEARTBEAT" 1 3600)
+    HEARTBEAT=$(ask_int "heartbeat (s)" "$HEARTBEAT" 1 "$(is_kcp && echo 40 || echo 3600)")
     CHANNEL_SIZE=$(ask_int "channel_size" "$CHANNEL_SIZE" 1 1000000)
     is_mux && ask_mux_advanced
     is_kcp && ask_kcp_advanced
@@ -563,6 +633,7 @@ new_client_tunnel() {
     TRANSPORT=$(ask_transport)
     SRV_HOST=$(ask "Iran server IP or domain" "")
     [[ -z $SRV_HOST ]] && { err "Server address is required."; return; }
+    [[ $SRV_HOST =~ ^[A-Za-z0-9._:-]+$ ]] || { err "Invalid server address."; return; }
     SRV_PORT=$(ask_int "Tunnel port on the server" 3080 1 65535)
     TOKEN=$(ask_token)
     if is_tls; then
@@ -571,7 +642,11 @@ new_client_tunnel() {
       [[ -z $TLS_PIN || $TLS_PIN =~ ^[0-9a-f]{64}$ ]] || { err "Invalid pin."; return; }
     fi
   fi
-  if is_tls && [[ -z $TLS_PIN ]]; then warn "No tls_pin: the server certificate will NOT be verified (MITM possible)."; fi
+  warn_plain
+  if is_tls && [[ -z $TLS_PIN ]]; then
+    warn "No tls_pin: the server certificate will NOT be verified (MITM possible)."
+    ask_yn "Continue WITHOUT certificate verification?" n || return
+  fi
   if ask_yn "Change advanced settings?" n; then
     POOL=$(ask_int "connection_pool" "$POOL" 1 1024)
     ask_yn "aggressive_pool?" n && AGGR=true
@@ -613,6 +688,7 @@ change_ports() {
   local newp=()
   mapfile -t newp < <(ask_ports)
   if [[ $mode == add ]]; then PORTS+=("${newp[@]}"); else PORTS=("${newp[@]}"); fi
+  mapfile -t PORTS < <(printf '%s\n' "${PORTS[@]}" | uniq_lines)
   set_ports "$n" "${PORTS[@]}"
   ok "Ports updated: ${PORTS[*]}"
   server_firewall
@@ -654,11 +730,11 @@ set_restart_schedule() {
     1) v=$(ask "Restart every how many minutes (e.g. 360 = 6h)" "360")
        [[ $v =~ ^[0-9]+$ ]] && (( v > 0 )) || { err "Enter a positive number."; return; }
        _cfg_clear_restart "$n"; _cfg_add_line "$n" "$role" "restart_interval = $v"
-       ok "Saved restart_interval = $v (applied on next restart of the tunnel)." ;;
+       ok "Saved restart_interval = $v (applied automatically: the running tunnel reloads its config within a few seconds)." ;;
     2) hhmm=$(ask "Daily restart time, 24h HH:MM (server local time)" "04:30")
        [[ $hhmm =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || { err "Use HH:MM, e.g. 04:30."; return; }
        _cfg_clear_restart "$n"; _cfg_add_line "$n" "$role" "restart_at = [\"$hhmm\"]"
-       ok "Saved restart_at = [\"$hhmm\"] (applied on next restart of the tunnel)." ;;
+       ok "Saved restart_at = [\"$hhmm\"] (applied automatically: the running tunnel reloads its config within a few seconds)." ;;
     3) v=$(ask "Cron schedule (5 fields, e.g. '0 */6 * * *' = every 6 hours)" "0 */6 * * *")
        [[ $v =~ ^[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+$ ]] || { err "Invalid cron expression."; return; }
        mkdir -p "$ROOT/etc/cron.d"
@@ -731,12 +807,16 @@ restart_all() {
 }
 update_self() {
   ensure_deps curl || return 1
-  local tmp
+  local tmp ref="${BH_REF:-main}"
+  [[ $ref =~ ^[A-Za-z0-9._/-]+$ ]] || { err "Invalid BH_REF."; return 1; }
   tmp=$(mktemp)
-  info "Downloading latest $CMD_NAME from $MY_REPO"
+  info "Downloading $CMD_NAME ($ref) from $MY_REPO"
   curl -fL --retry 3 --connect-timeout 15 -o "$tmp" \
-    --proto '=https' --tlsv1.2 "https://raw.githubusercontent.com/ParvaneZone/BH_Parv/main/backhaul-manager.sh" \
+    --proto '=https' --tlsv1.2 "https://raw.githubusercontent.com/ParvaneZone/BH_Parv/${ref}/backhaul-manager.sh" \
     || { err "Download failed."; rm -f "$tmp"; return 1; }
+  bash -n "$tmp" || { err "Downloaded script has syntax errors - not installing."; rm -f "$tmp"; return 1; }
+  info "SHA-256 of the new manager: $(sha256sum "$tmp" | awk '{print $1}')"
+  ask_yn "Install it? (this script runs as root)" n || { rm -f "$tmp"; return 0; }
   install -m 755 "$tmp" "$SELF_CMD" && ok "Updated. Run '$CMD_NAME' to use the new version."
   rm -f "$tmp"
 }
@@ -750,6 +830,7 @@ uninstall_all() {
     sd disable "${SVC_PREFIX}${n}" >/dev/null 2>&1
     rm -f "$SVC_DIR/${SVC_PREFIX}${n}.service"
   done
+  rm -f "$ROOT"/etc/cron.d/backhaul-restart-*
   rm -rf "$CONF_DIR" "$BIN"
   sd daemon-reload
   ok "Everything removed."

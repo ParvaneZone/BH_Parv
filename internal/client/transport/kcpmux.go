@@ -18,6 +18,10 @@ import (
 	"github.com/xtaci/smux"
 )
 
+// kcpControlTimeout is how long the client waits for any control message
+// (heartbeat) before it declares the control channel dead and reconnects.
+const kcpControlTimeout = 120 * time.Second
+
 type KcpMuxTransport struct {
 	config          *KcpMuxConfig
 	smuxConfig      *smux.Config
@@ -270,6 +274,7 @@ func (c *KcpMuxTransport) poolMaintainer() {
 
 func (c *KcpMuxTransport) channelHandler() {
 	msgChan := make(chan byte, 1000)
+	ctrl := c.controlChannel // local copy: Restart() sets c.controlChannel to nil
 
 	// Goroutine to handle the blocking ReceiveBinaryString
 	go func() {
@@ -278,7 +283,11 @@ func (c *KcpMuxTransport) channelHandler() {
 			case <-c.ctx.Done():
 				return
 			default:
-				msg, err := utils.ReceiveBinaryByte(c.controlChannel)
+				// UDP has no RST/keepalive: without a deadline a dead or restarted
+				// server would leave this read blocked forever. The server sends a
+				// heartbeat well within kcpControlTimeout (its interval is capped).
+				_ = ctrl.SetReadDeadline(time.Now().Add(kcpControlTimeout))
+				msg, err := utils.ReceiveBinaryByte(ctrl)
 				if err != nil {
 					if c.cancel != nil {
 						c.logger.Error("failed to read from control channel. ", err)
